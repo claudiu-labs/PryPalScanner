@@ -20,6 +20,7 @@ Set one of these:
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (JSON string)
 - `GOOGLE_SERVICE_ACCOUNT_FILE` (path to json file)
 - OR `GOOGLE_APPS_SCRIPT_URL` (Apps Script Web App URL)
+- `GOOGLE_APPS_SCRIPT_KEY` (optional, if you enable API key check)
 
 Also set (one of the two):
 
@@ -46,8 +47,14 @@ Use this if you don't want Google Cloud credentials. Create a bound Apps Script:
 3) Paste this script and deploy as Web App (Execute as: Me, Access: Anyone)
 
 ```
+var API_KEY = "CHANGE_ME"; // optional
+
 function doPost(e) {
   var body = JSON.parse(e.postData.contents || '{}');
+  if (API_KEY && body.apiKey !== API_KEY) {
+    return ContentService.createTextOutput(JSON.stringify({ok:false, error:"unauthorized"}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
   var action = body.action;
   var sheetName = body.sheet;
   var ss = body.sheetId ? SpreadsheetApp.openById(body.sheetId) : SpreadsheetApp.getActiveSpreadsheet();

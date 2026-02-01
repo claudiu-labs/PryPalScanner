@@ -146,6 +146,9 @@ def get_gs_client():
     return gspread.authorize(creds)
 
 def apps_script_call(url: str, payload: dict) -> dict:
+    api_key = get_secret("GOOGLE_APPS_SCRIPT_KEY")
+    if api_key and "apiKey" not in payload:
+        payload["apiKey"] = api_key
     data = json.dumps(payload).encode("utf-8")
     req = Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
