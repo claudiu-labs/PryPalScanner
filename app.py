@@ -432,6 +432,28 @@ class FirestoreCollection:
             q = q.where(field, op, value)
         return list(q.stream())
 
+
+def bump_material_active(ws_materials, material_code: str, delta: int):
+    if not material_code:
+        return
+    if isinstance(ws_materials, FirestoreCollection) and fb_firestore:
+        ws_materials._col().document(material_code).set(
+            {"active_count": fb_firestore.Increment(delta)},
+            merge=True,
+        )
+        return
+
+
+def set_material_active(ws_materials, material_code: str, value: int):
+    if not material_code:
+        return
+    if isinstance(ws_materials, FirestoreCollection):
+        ws_materials._col().document(material_code).set(
+            {"active_count": int(value)},
+            merge=True,
+        )
+        return
+
 def get_or_create_spreadsheet(client, sheet_id: str | None, title: str | None):
     if sheet_id:
         try:
@@ -807,7 +829,16 @@ def operator_screen(spreadsheet):
             return
 
         cols = st.columns(2)
-        counts_map = get_active_drum_counts(ws_drums)
+        counts_map = {}
+        if "active_count" in active_materials.columns:
+            for _, r in active_materials.iterrows():
+                code_val = r.get("material_code")
+                try:
+                    counts_map[code_val] = int(r.get("active_count") or 0)
+                except Exception:
+                    counts_map[code_val] = 0
+        else:
+            counts_map = get_active_drum_counts(ws_drums)
         for idx, (_, row) in enumerate(active_materials.iterrows()):
             code = row["material_code"]
             description = row.get("description", "")
@@ -1014,6 +1045,8 @@ def operator_screen(spreadsheet):
                     "operator": get_operator_name(),
                 },
             )
+            bump_material_active(ws_materials, selected, 1)
+            clear_cached_data()
             st.session_state.pending_scan = None
             st.success("Scan salvat.")
             st.rerun()
@@ -1030,6 +1063,7 @@ def operator_screen(spreadsheet):
             else:
                 last_row = int(active_drums["__row"].max())
                 delete_row(ws_drums, last_row)
+            bump_material_active(ws_materials, selected, -1)
             st.success("Ultimul tambur a fost sters.")
             st.rerun()
 
@@ -1080,6 +1114,7 @@ def operator_screen(spreadsheet):
             )
 
             set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+            set_material_active(ws_materials, selected, 0)
             clear_cached_data()
             st.session_state.confirm_generate = False
             st.success(t("pallet_generated"))
@@ -1126,6 +1161,7 @@ def operator_screen(spreadsheet):
                 )
 
                 set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+                set_material_active(ws_materials, selected, 0)
                 clear_cached_data()
                 st.session_state.confirm_incomplete = False
                 st.success(t("pallet_incomplete_generated"))
