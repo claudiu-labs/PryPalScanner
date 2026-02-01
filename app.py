@@ -652,18 +652,38 @@ def operator_screen(spreadsheet):
 
     # Scan input
     st.markdown("### Scanare")
-    st.caption("Foloseste scanerul Zebra. Inputul trebuie sa fie focusat.")
+    st.caption("Foloseste scanerul Zebra sau introdu manual codul scanat.")
 
     if "pending_scan" not in st.session_state:
         st.session_state.pending_scan = None
 
-    scan_raw = st.text_input("Scan QR (Drum Type + Drum Number)", key="scan_input")
-
-    if scan_raw:
-        parsed = parse_qr(scan_raw)
+    def process_scan(raw_value: str):
+        raw_value = (raw_value or "").strip()
+        if not raw_value:
+            return
+        parsed = parse_qr(raw_value)
         st.session_state.pending_scan = parsed
         st.session_state.scan_input = ""
+        st.session_state.manual_scan_input = ""
         st.rerun()
+
+    scan_raw = st.text_input(
+        "Scaneaza / Introdu cod QR (Drum Type + Drum Number)",
+        key="scan_input",
+        placeholder="Ex: DWP1500_LV 15518289",
+    )
+
+    if scan_raw:
+        process_scan(scan_raw)
+
+    with st.expander("Introdu manual codul scanat"):
+        manual_raw = st.text_input(
+            "Cod scanat (manual)",
+            key="manual_scan_input",
+            placeholder="Ex: DWP1500_LV 15518289",
+        )
+        if st.button("Proceseaza manual"):
+            process_scan(manual_raw)
 
     pending = st.session_state.get("pending_scan")
 
