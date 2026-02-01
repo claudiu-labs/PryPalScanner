@@ -213,15 +213,15 @@ Collections:
 
 If you want email sending, we can add SMTP queue + retry in a later step.
 
-## 10) Android APK (WebView wrapper)
+## 10) Android APK (Native)
 
-There is a minimal Android app in `android-app/` that opens the Streamlit URL in a WebView.
+The Android app in `android-app/` is **native** and connects directly to Firestore.
 
-How it works:
-- On first run, the app asks for the Streamlit URL and stores it locally.
-- You can change the URL later via the menu.
+Requirements:
+- `google-services.json` (Firebase) placed in `android-app/app/`
 
 Build (via GitHub Actions):
+- Add a GitHub secret named `GOOGLE_SERVICES_JSON_BASE64` with base64 of your `google-services.json`.
 - Push any change in `android-app/` to trigger the workflow.
 - Download the artifact `PryPalScanner-debug-apk` from the Actions run.
 
@@ -229,7 +229,7 @@ Quick download (QR):
 
 ![APK QR](android-app/apk-download-qr.png)
 
-If you want the direct URL, it's the `apk-latest` release asset:
+Direct URL (`apk-latest` release asset):
 
 ```
 https://github.com/claudiu-labs/PryPalScanner/releases/download/apk-latest/app-debug.apk

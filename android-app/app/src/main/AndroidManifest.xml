@@ -7,7 +7,15 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.PryPalScanner">
         <activity
-            android:name=".MainActivity"
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+        <activity
+            android:name=".MaterialsActivity"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+        <activity
+            android:name=".LoginActivity"
             android:exported="true"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
             <intent-filter>
