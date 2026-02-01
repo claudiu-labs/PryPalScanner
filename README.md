@@ -132,11 +132,27 @@ Recommended profile:
 - Send ENTER suffix: ON (so Streamlit captures the scan)
 - Intent output: OFF
 
-## 4) Notes about OCR
+## 4) QR format
+
+Expected scan format (DataWedge sends keystrokes):
+
+```
+<DRUM_TYPE> <DRUM_NUMBER>
+```
+
+Example:
+
+```
+DWP1500_LV 15518289
+```
+
+Material Code and Standard Quantity are captured separately (manual input or OCR).
+
+## 5) Notes about OCR
 
 OCR uses pytesseract if available on the host. If Tesseract is not installed, OCR will be disabled automatically and you will enter values manually.
 
-## 5) Sheets created automatically
+## 6) Sheets created automatically
 
 The app will create these worksheets if missing:
 - `materials`
@@ -144,7 +160,7 @@ The app will create these worksheets if missing:
 - `drums`
 - `pallets`
 
-## 6) Operator flow
+## 7) Operator flow
 
 - Select material
 - Scan drum QR
@@ -152,11 +168,46 @@ The app will create these worksheets if missing:
 - Save
 - When max qty reached, generate pallet
 
-## 7) Admin
+## 8) Admin
 
 - Manage materials
 - Set global pallet counter
+- Set reports email (used for CSV/XLSX exports)
 - View history / search by drum number
+
+## 9) Database schema (Firestore)
+
+Collections:
+
+- `materials` (doc id = `material_code`)
+  - `material_code` (string)
+  - `description` (string)
+  - `max_qty` (number)
+  - `prefix` (string)
+  - `allow_incomplete` (boolean)
+  - `active` (boolean)
+- `settings` (doc id = `global`)
+  - `global_pallet_counter` (number)
+  - `report_email` (string)
+- `drums` (doc id = `drum_number`)
+  - `timestamp` (string)
+  - `material_code` (string)
+  - `drum_number` (string)
+  - `drum_type` (string)
+  - `standard_qty` (string)
+  - `pallet_id` (string)
+  - `status` (ACTIVE/COMPLETED)
+  - `device_id` (string)
+  - `operator` (string)
+- `pallets` (doc id = `pallet_id`)
+  - `pallet_id` (string)
+  - `material_code` (string)
+  - `description` (string)
+  - `created_at` (string)
+  - `count` (number)
+  - `complete_type` (FULL/INCOMPLETE)
+  - `email_subject` (string)
+  - `email_body` (string)
 
 ---
 

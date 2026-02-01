@@ -1,7 +1,11 @@
+import io
 import json
 import os
 import re
+import smtplib
+import zipfile
 from datetime import datetime
+from email.message import EmailMessage
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
@@ -51,12 +55,19 @@ TRANSLATIONS = {
         "btn_cancel": "Renunta",
         "btn_generate": "Genereaza palet",
         "btn_incomplete": "🟧 Palet incomplet",
+        "btn_undo_last": "Anuleaza Ultimul Tambur",
         "label_language": "Limba",
         "label_admin": "Admin",
         "label_login": "Conectare",
         "label_password": "Parola",
         "label_logout": "Logout",
+        "label_materials": "Materiale",
+        "label_scanned_drums": "Tamburi scanati",
         "label_filter_material": "Filtru Material Code",
+        "label_reports_email": "Reports email",
+        "label_export_csv": "Export CSV",
+        "label_export_excel": "Export Excel",
+        "label_allow_incomplete": "Finalize early (Palet incomplet)",
         "email_subject": "{date} - Rebobinari \"{material}\" - {pallet}",
         "email_header": "Material {material} - Pallet {pallet}",
         "email_description": "Description: {description}",
@@ -75,12 +86,19 @@ TRANSLATIONS = {
         "btn_cancel": "Cancel",
         "btn_generate": "Generate pallet",
         "btn_incomplete": "🟧 Incomplete pallet",
+        "btn_undo_last": "Cancel Last Drum",
         "label_language": "Language",
         "label_admin": "Admin",
-        "label_login": "Login",
+        "label_login": "Admin login",
         "label_password": "Password",
         "label_logout": "Logout",
+        "label_materials": "Materials",
+        "label_scanned_drums": "Scanned drums",
         "label_filter_material": "Filter Material Code",
+        "label_reports_email": "Reports email",
+        "label_export_csv": "Export CSV",
+        "label_export_excel": "Export Excel",
+        "label_allow_incomplete": "Allow Incomplete Pallet",
         "email_subject": "{date} - Rewinding {material} - {pallet}",
         "email_header": "Material {material} - Pallet {pallet}",
         "email_description": "Description: {description}",
@@ -225,6 +243,58 @@ def build_email_body(material_code: str, description: str, pallet_id: str, drums
         for _, row in drums_df.iterrows():
             lines.append(f"{row.get('drum_number','')} | {row.get('standard_qty','')}")
     return "\n".join(lines)
+
+
+def build_report_zip(pallets_df: pd.DataFrame, drums_df: pd.DataFrame) -> bytes:
+    pallets_df = pallets_df.drop(columns=["__row", "__doc_id"], errors="ignore")
+    drums_df = drums_df.drop(columns=["__row", "__doc_id"], errors="ignore")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("pallets.csv", pallets_df.to_csv(index=False))
+        zf.writestr("drums.csv", drums_df.to_csv(index=False))
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_report_excel(pallets_df: pd.DataFrame, drums_df: pd.DataFrame) -> bytes:
+    pallets_df = pallets_df.drop(columns=["__row", "__doc_id"], errors="ignore")
+    drums_df = drums_df.drop(columns=["__row", "__doc_id"], errors="ignore")
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pallets_df.to_excel(writer, index=False, sheet_name="pallets")
+        drums_df.to_excel(writer, index=False, sheet_name="drums")
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def send_report_email(to_email: str, subject: str, body: str, attachments: list[tuple[str, bytes, str]]):
+    host = get_secret("SMTP_HOST")
+    user = get_secret("SMTP_USER")
+    password = get_secret("SMTP_PASSWORD")
+    sender = get_secret("SMTP_FROM", user or "")
+    port_raw = get_secret("SMTP_PORT", "587") or "587"
+    try:
+        port = int(port_raw)
+    except Exception:
+        port = 587
+
+    if not host or not user or not password or not sender:
+        return False, "SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM."
+
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+    for filename, content, mime in attachments:
+        maintype, subtype = mime.split("/", 1)
+        msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
+
+    with smtplib.SMTP(host, port) as server:
+        server.starttls()
+        server.login(user, password)
+        server.send_message(msg)
+    return True, ""
 
 
 # -------------------- Google Sheets --------------------
@@ -757,7 +827,7 @@ def operator_screen(spreadsheet):
     st.markdown("---")
 
     # List of scanned drums
-    st.markdown("### Tamburi scanati (palet curent)")
+    st.markdown(f"### {t('label_scanned_drums')}")
     if active_drums.empty:
         st.info("Palet gol.")
     else:
@@ -887,7 +957,7 @@ def operator_screen(spreadsheet):
             st.rerun()
 
     # Undo last scan
-    if st.button("Undo last scan", key="undo_scan"):
+    if st.button(t("btn_undo_last"), key="undo_scan"):
         active_drums = get_active_drums(ws_drums, selected)
         if active_drums.empty:
             st.info("Nu exista scanari active.")
@@ -1014,17 +1084,20 @@ def admin_screen(spreadsheet):
     # Settings
     settings = get_settings(ws_settings)
     current_counter = settings.get("global_pallet_counter", "0")
+    current_report_email = settings.get("report_email", "")
     with st.form("settings_form"):
         new_counter = st.text_input("Global pallet counter", value=current_counter)
+        report_email = st.text_input(t("label_reports_email"), value=current_report_email)
         save_settings = st.form_submit_button("Salveaza setari")
     if save_settings:
         set_setting(ws_settings, "global_pallet_counter", new_counter)
+        set_setting(ws_settings, "report_email", report_email)
         st.success("Setari salvate.")
 
     st.markdown("---")
 
     # Materials management
-    st.markdown("### Materiale")
+    st.markdown(f"### {t('label_materials')}")
     materials_df = get_materials(ws_materials)
     if not materials_df.empty:
         st.dataframe(materials_df.drop(columns=["__row"], errors="ignore"), use_container_width=True)
@@ -1034,7 +1107,7 @@ def admin_screen(spreadsheet):
         description = st.text_input("Description")
         max_qty = st.number_input("Max qty / pallet", min_value=1, step=1)
         prefix = st.text_input("Prefix (optional)")
-        allow_incomplete = st.checkbox("Finalize early (Palet incomplet)")
+        allow_incomplete = st.checkbox(t("label_allow_incomplete"))
         active = st.checkbox("Active", value=True)
         save_material = st.form_submit_button("Adauga / Update")
 
@@ -1072,7 +1145,7 @@ def admin_screen(spreadsheet):
     st.markdown("---")
 
     # History / Search
-    st.markdown("### History & Search")
+    st.markdown("### History & Reports")
     pallets_df = load_sheet(ws_pallets)
     drums_df = load_sheet(ws_drums)
 
@@ -1110,6 +1183,35 @@ def admin_screen(spreadsheet):
             pallets_view = pallets_view[pallets_view["material_code"].astype(str).str.contains(material_filter, case=False, na=False)]
         if not drums_view.empty and "material_code" in drums_view.columns:
             drums_view = drums_view[drums_view["material_code"].astype(str).str.contains(material_filter, case=False, na=False)]
+
+    st.markdown("### Export")
+    export_cols = st.columns(2)
+    report_email = settings.get("report_email", "").strip()
+
+    def send_report(kind: str):
+        if not report_email:
+            st.warning("Seteaza Reports email in Admin.")
+            return
+        subject = f"{APP_TITLE} Report - {today_date()}"
+        body = "Attached: pallets + drums export."
+        if kind == "csv":
+            content = build_report_zip(pallets_view, drums_view)
+            filename = f"report_{today_date()}.zip"
+            mime = "application/zip"
+        else:
+            content = build_report_excel(pallets_view, drums_view)
+            filename = f"report_{today_date()}.xlsx"
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ok, err = send_report_email(report_email, subject, body, [(filename, content, mime)])
+        if ok:
+            st.success("Raport trimis pe email.")
+        else:
+            st.error(err)
+
+    if export_cols[0].button(t("label_export_csv")):
+        send_report("csv")
+    if export_cols[1].button(t("label_export_excel")):
+        send_report("excel")
 
     if not pallets_view.empty:
         st.dataframe(pallets_view.drop(columns=["__row"], errors="ignore"), use_container_width=True)
