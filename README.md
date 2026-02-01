@@ -224,3 +224,13 @@ How it works:
 Build (via GitHub Actions):
 - Push any change in `android-app/` to trigger the workflow.
 - Download the artifact `PryPalScanner-debug-apk` from the Actions run.
+
+Quick download (QR):
+
+![APK QR](android-app/apk-download-qr.png)
+
+If you want the direct URL, it's the `apk-latest` release asset:
+
+```
+https://github.com/claudiu-labs/PryPalScanner/releases/download/apk-latest/app-debug.apk
+```

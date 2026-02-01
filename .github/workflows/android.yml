@@ -25,8 +25,17 @@ jobs:
         working-directory: android-app
         run: ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: PryPalScanner-debug-apk
           path: android-app/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK Release (apk-latest)
+        uses: ncipollo/release-action@v1
+        with:
+          tag: apk-latest
+          name: APK Latest (Debug)
+          prerelease: true
+          allowUpdates: true
+          artifacts: android-app/app/build/outputs/apk/debug/app-debug.apk
