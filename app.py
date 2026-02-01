@@ -74,6 +74,19 @@ def get_secret(key: str, default: str | None = None) -> str | None:
         return st.secrets[key]
     return os.getenv(key, default)
 
+def parse_service_account_json(sa_json: str) -> dict:
+    try:
+        return json.loads(sa_json)
+    except json.JSONDecodeError:
+        if "private_key" not in sa_json:
+            raise
+        def repl(match):
+            key = match.group(1)
+            key = key.replace("\n", "\\n")
+            return f"\"private_key\": \"{key}\""
+        fixed = re.sub(r'"private_key"\s*:\s*"(.+?)"', repl, sa_json, flags=re.S)
+        return json.loads(fixed)
+
 
 def now_ts() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -168,7 +181,7 @@ def get_fs_client():
     sa_json = get_secret("FIREBASE_SERVICE_ACCOUNT_JSON")
     if not sa_json or firebase_admin is None or fb_credentials is None or fb_firestore is None:
         return None
-    info = json.loads(sa_json)
+    info = parse_service_account_json(sa_json)
     if not firebase_admin._apps:
         cred = fb_credentials.Certificate(info)
         firebase_admin.initialize_app(cred)
@@ -454,6 +467,9 @@ def add_pallet(ws_pallets, pallet_id: str, row: dict):
     headers = ws_pallets.row_values(1)
     ws_pallets.append_row([row.get(h, "") for h in headers])
 
+def get_operator_name() -> str:
+    return st.session_state.get("username") or get_secret("OPERATOR", "") or ""
+
 
 def delete_row(ws, row_idx: int):
     if isinstance(ws, FirestoreCollection):
@@ -720,7 +736,7 @@ def operator_screen(spreadsheet):
                     "pallet_id": "",
                     "status": "ACTIVE",
                     "device_id": get_secret("DEVICE_ID", ""),
-                    "operator": get_secret("OPERATOR", ""),
+                    "operator": get_operator_name(),
                 },
             )
             st.session_state.pending_scan = None
@@ -881,6 +897,10 @@ def admin_screen(spreadsheet):
     if not pallets_df.empty:
         st.dataframe(pallets_df.drop(columns=["__row"], errors="ignore"), use_container_width=True)
 
+    st.markdown("### Toate scanarile")
+    if not drums_df.empty:
+        st.dataframe(drums_df.drop(columns=["__row"], errors="ignore"), use_container_width=True)
+
     search_drum = st.text_input("Cauta drum number")
     if search_drum:
         result = drums_df[drums_df["drum_number"] == search_drum] if not drums_df.empty else pd.DataFrame()
@@ -923,39 +943,45 @@ def main():
             f"ID: {spreadsheet.id}. Actualizeaza GOOGLE_SHEET_ID cu acest ID."
         )
 
-    if "admin_mode" not in st.session_state:
-        st.session_state.admin_mode = False
-    if "admin_logged" not in st.session_state:
-        st.session_state.admin_logged = False
+    if "auth_role" not in st.session_state:
+        st.session_state.auth_role = None
+    if "username" not in st.session_state:
+        st.session_state.username = ""
 
-    if st.session_state.admin_mode and not st.session_state.admin_logged:
-        st.markdown("## Admin login")
-        pw = st.text_input("Parola admin", type="password")
+    if not st.session_state.auth_role:
+        st.markdown("## Conectare")
+        username = st.text_input("User")
+        password = st.text_input("Parola", type="password")
         if st.button("Login"):
-            if pw == get_secret("ADMIN_PASSWORD", ""):
-                st.session_state.admin_logged = True
+            operator_pw = get_secret("OPERATOR_PASSWORD", "PryPass2026")
+            admin_pw = get_secret("ADMIN_PASSWORD", "PryAdmin2026")
+            if password == admin_pw:
+                st.session_state.auth_role = "admin"
+                st.session_state.username = username.strip() or "admin"
+                st.rerun()
+            elif password == operator_pw:
+                st.session_state.auth_role = "operator"
+                st.session_state.username = username.strip() or "operator"
                 st.rerun()
             else:
                 st.error("Parola gresita.")
-        if st.button("Inapoi"):
-            st.session_state.admin_mode = False
-            st.rerun()
         return
 
-    if st.session_state.admin_mode and st.session_state.admin_logged:
-        if st.button("Iesire admin"):
-            st.session_state.admin_mode = False
-            st.session_state.admin_logged = False
+    if st.session_state.auth_role == "admin":
+        if st.button("Logout"):
+            st.session_state.auth_role = None
+            st.session_state.username = ""
             st.rerun()
         admin_screen(spreadsheet)
         return
 
-    operator_screen(spreadsheet)
-
-    st.markdown("---")
-    if st.button("Admin"):
-        st.session_state.admin_mode = True
-        st.rerun()
+    if st.session_state.auth_role == "operator":
+        if st.button("Logout"):
+            st.session_state.auth_role = None
+            st.session_state.username = ""
+            st.rerun()
+        operator_screen(spreadsheet)
+        return
 
 
 if __name__ == "__main__":

@@ -23,11 +23,12 @@ Set one of these:
 - OR `FIREBASE_SERVICE_ACCOUNT_JSON` (Firestore, recommended for DB)
 - `GOOGLE_APPS_SCRIPT_KEY` (optional, if you enable API key check)
 
-Also set (one of the two):
+Also set:
 
 - `GOOGLE_SHEET_ID`
 - `GOOGLE_SHEET_TITLE` (optional, used to create sheet if ID missing)
-- `ADMIN_PASSWORD`
+ - `ADMIN_PASSWORD` (admin login)
+ - `OPERATOR_PASSWORD` (operator login)
 
 Example (Linux/macOS):
 
