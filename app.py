@@ -17,6 +17,15 @@ except Exception as exc:  # pragma: no cover - runtime dependency
     Credentials = None
     SpreadsheetNotFound = Exception
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials as fb_credentials
+    from firebase_admin import firestore as fb_firestore
+except Exception:
+    firebase_admin = None
+    fb_credentials = None
+    fb_firestore = None
+
 # Optional OCR (works only if tesseract is installed on the host)
 try:
     import pytesseract
@@ -117,6 +126,15 @@ def extract_ocr_fields(image_bytes: bytes, drum_number: str | None) -> dict:
         "raw_text": text,
     }
 
+def normalize_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().upper() in {"TRUE", "1", "YES", "Y"}
+
 
 # -------------------- Google Sheets --------------------
 
@@ -144,6 +162,17 @@ def get_gs_client():
     ]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
+
+@st.cache_resource
+def get_fs_client():
+    sa_json = get_secret("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if not sa_json or firebase_admin is None or fb_credentials is None or fb_firestore is None:
+        return None
+    info = json.loads(sa_json)
+    if not firebase_admin._apps:
+        cred = fb_credentials.Certificate(info)
+        firebase_admin.initialize_app(cred)
+    return fb_firestore.client()
 
 def apps_script_call(url: str, payload: dict) -> dict:
     api_key = get_secret("GOOGLE_APPS_SCRIPT_KEY")
@@ -202,6 +231,46 @@ class AppsScriptWorksheet:
     def delete_rows(self, row: int):
         return self._call("delete", row=row)
 
+class FirestoreDatabase:
+    def __init__(self, client):
+        self.client = client
+
+    def worksheet(self, name: str):
+        return FirestoreCollection(self.client, name)
+
+class FirestoreCollection:
+    def __init__(self, client, name: str):
+        self.client = client
+        self.name = name
+        self._is_firestore = True
+
+    def _col(self):
+        return self.client.collection(self.name)
+
+    def get_doc(self, doc_id: str):
+        return self._col().document(doc_id).get()
+
+    def set_doc(self, doc_id: str, data: dict):
+        return self._col().document(doc_id).set(data, merge=True)
+
+    def add_doc(self, data: dict):
+        return self._col().add(data)
+
+    def update_doc(self, doc_id: str, updates: dict):
+        return self._col().document(doc_id).set(updates, merge=True)
+
+    def delete_doc(self, doc_id: str):
+        return self._col().document(doc_id).delete()
+
+    def stream(self):
+        return list(self._col().stream())
+
+    def query(self, filters: list[tuple]):
+        q = self._col()
+        for field, op, value in filters:
+            q = q.where(field, op, value)
+        return list(q.stream())
+
 def get_or_create_spreadsheet(client, sheet_id: str | None, title: str | None):
     if sheet_id:
         try:
@@ -219,6 +288,9 @@ def get_or_create_spreadsheet(client, sheet_id: str | None, title: str | None):
 
 
 def ensure_worksheet(spreadsheet, name: str, headers: list[str]):
+    # Firestore backend
+    if isinstance(spreadsheet, FirestoreDatabase):
+        return spreadsheet.worksheet(name)
     # Apps Script backend
     if isinstance(spreadsheet, AppsScriptSpreadsheet):
         ws = spreadsheet.worksheet(name)
@@ -241,6 +313,17 @@ def ensure_worksheet(spreadsheet, name: str, headers: list[str]):
 
 
 def load_sheet(ws) -> pd.DataFrame:
+    if isinstance(ws, FirestoreCollection):
+        docs = ws.stream()
+        rows = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            data["__doc_id"] = doc.id
+            rows.append(data)
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows)
+
     values = ws.get_all_values()
     if not values:
         return pd.DataFrame()
@@ -252,11 +335,16 @@ def load_sheet(ws) -> pd.DataFrame:
 
 
 def get_header_map(ws) -> dict:
+    if isinstance(ws, FirestoreCollection):
+        return {}
     headers = ws.row_values(1)
     return {h: i + 1 for i, h in enumerate(headers)}
 
 
 def update_row(ws, row_idx: int, updates: dict):
+    if isinstance(ws, FirestoreCollection):
+        ws.update_doc(str(row_idx), updates)
+        return
     header_map = get_header_map(ws)
     for key, val in updates.items():
         col = header_map.get(key)
@@ -267,6 +355,12 @@ def update_row(ws, row_idx: int, updates: dict):
 # -------------------- Data Helpers --------------------
 
 def get_settings(ws_settings) -> dict:
+    if isinstance(ws_settings, FirestoreCollection):
+        doc = ws_settings.get_doc("global")
+        if not doc.exists:
+            return {}
+        data = doc.to_dict() or {}
+        return {k: str(v) for k, v in data.items()}
     df = load_sheet(ws_settings)
     if df.empty:
         return {}
@@ -274,6 +368,13 @@ def get_settings(ws_settings) -> dict:
 
 
 def set_setting(ws_settings, key: str, value: str):
+    if isinstance(ws_settings, FirestoreCollection):
+        try:
+            value_cast = int(value)
+        except Exception:
+            value_cast = value
+        ws_settings.update_doc("global", {key: value_cast})
+        return
     df = load_sheet(ws_settings)
     if df.empty:
         ws_settings.append_row([key, value])
@@ -290,12 +391,29 @@ def get_materials(ws_materials) -> pd.DataFrame:
     df = load_sheet(ws_materials)
     if df.empty:
         return df
-    # Normalize
-    df["active"] = df["active"].str.upper().fillna("TRUE")
+    if "material_code" not in df.columns and "__doc_id" in df.columns:
+        df["material_code"] = df["__doc_id"]
+    if "active" in df.columns:
+        df["active"] = df["active"].apply(normalize_bool)
+    else:
+        df["active"] = True
     return df
 
 
 def get_active_drums(ws_drums, material_code: str) -> pd.DataFrame:
+    if isinstance(ws_drums, FirestoreCollection):
+        docs = ws_drums.query([
+            ("material_code", "==", material_code),
+            ("status", "==", "ACTIVE"),
+        ])
+        rows = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            data["__doc_id"] = doc.id
+            rows.append(data)
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows)
     df = load_sheet(ws_drums)
     if df.empty:
         return df
@@ -306,6 +424,13 @@ def get_active_drums(ws_drums, material_code: str) -> pd.DataFrame:
 
 
 def find_drum(ws_drums, drum_number: str) -> pd.DataFrame:
+    if isinstance(ws_drums, FirestoreCollection):
+        doc = ws_drums.get_doc(drum_number)
+        if not doc.exists:
+            return pd.DataFrame()
+        data = doc.to_dict() or {}
+        data["__doc_id"] = doc.id
+        return pd.DataFrame([data])
     df = load_sheet(ws_drums)
     if df.empty:
         return df
@@ -313,11 +438,27 @@ def find_drum(ws_drums, drum_number: str) -> pd.DataFrame:
 
 
 def add_drum(ws_drums, row: dict):
+    if isinstance(ws_drums, FirestoreCollection):
+        doc_id = row.get("drum_number")
+        if not doc_id:
+            raise RuntimeError("Missing drum_number for Firestore document id.")
+        ws_drums.set_doc(doc_id, row)
+        return
     headers = ws_drums.row_values(1)
     ws_drums.append_row([row.get(h, "") for h in headers])
 
+def add_pallet(ws_pallets, pallet_id: str, row: dict):
+    if isinstance(ws_pallets, FirestoreCollection):
+        ws_pallets.set_doc(pallet_id, row)
+        return
+    headers = ws_pallets.row_values(1)
+    ws_pallets.append_row([row.get(h, "") for h in headers])
+
 
 def delete_row(ws, row_idx: int):
+    if isinstance(ws, FirestoreCollection):
+        ws.delete_doc(str(row_idx))
+        return
     ws.delete_rows(row_idx)
 
 
@@ -407,7 +548,7 @@ def operator_screen(spreadsheet):
     ws_pallets = ensure_worksheet(spreadsheet, "pallets", SHEET_TEMPLATES["pallets"])
 
     materials_df = get_materials(ws_materials)
-    active_materials = materials_df[materials_df["active"].str.upper() != "FALSE"] if not materials_df.empty else pd.DataFrame()
+    active_materials = materials_df[materials_df["active"]] if not materials_df.empty else pd.DataFrame()
 
     wake_lock_script()
 
@@ -472,7 +613,7 @@ def operator_screen(spreadsheet):
     except Exception:
         max_qty = 0
     prefix = mat.get("prefix", "") or ""
-    allow_incomplete = str(mat.get("allow_incomplete", "FALSE")).upper() == "TRUE"
+    allow_incomplete = normalize_bool(mat.get("allow_incomplete", False))
 
     active_drums = get_active_drums(ws_drums, selected)
     count = len(active_drums)
@@ -592,8 +733,12 @@ def operator_screen(spreadsheet):
         if active_drums.empty:
             st.info("Nu exista scanari active.")
         else:
-            last_row = int(active_drums["__row"].max())
-            delete_row(ws_drums, last_row)
+            if "__doc_id" in active_drums.columns:
+                last_doc = active_drums.sort_values("timestamp").iloc[-1]["__doc_id"]
+                delete_row(ws_drums, last_doc)
+            else:
+                last_row = int(active_drums["__row"].max())
+                delete_row(ws_drums, last_row)
             st.success("Ultimul tambur a fost sters.")
             st.rerun()
 
@@ -609,10 +754,19 @@ def operator_screen(spreadsheet):
             # Update active drums with pallet_id
             active_drums = get_active_drums(ws_drums, selected)
             for _, row in active_drums.iterrows():
-                update_row(ws_drums, int(row["__row"]), {"pallet_id": pallet_id, "status": "COMPLETED"})
+                row_id = row["__doc_id"] if "__doc_id" in row else int(row["__row"])
+                update_row(ws_drums, row_id, {"pallet_id": pallet_id, "status": "COMPLETED"})
 
-            ws_pallets.append_row(
-                [pallet_id, selected, now_ts(), str(len(active_drums)), "FULL"]
+            add_pallet(
+                ws_pallets,
+                pallet_id,
+                {
+                    "pallet_id": pallet_id,
+                    "material_code": selected,
+                    "created_at": now_ts(),
+                    "count": len(active_drums),
+                    "complete_type": "FULL",
+                },
             )
 
             set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
@@ -628,10 +782,19 @@ def operator_screen(spreadsheet):
 
             active_drums = get_active_drums(ws_drums, selected)
             for _, row in active_drums.iterrows():
-                update_row(ws_drums, int(row["__row"]), {"pallet_id": pallet_id, "status": "COMPLETED"})
+                row_id = row["__doc_id"] if "__doc_id" in row else int(row["__row"])
+                update_row(ws_drums, row_id, {"pallet_id": pallet_id, "status": "COMPLETED"})
 
-            ws_pallets.append_row(
-                [pallet_id, selected, now_ts(), str(len(active_drums)), "INCOMPLETE"]
+            add_pallet(
+                ws_pallets,
+                pallet_id,
+                {
+                    "pallet_id": pallet_id,
+                    "material_code": selected,
+                    "created_at": now_ts(),
+                    "count": len(active_drums),
+                    "complete_type": "INCOMPLETE",
+                },
             )
 
             set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
@@ -680,21 +843,33 @@ def admin_screen(spreadsheet):
     if save_material:
         df = get_materials(ws_materials)
         existing = df[df["material_code"] == material_code] if not df.empty else pd.DataFrame()
-        row_data = {
-            "material_code": material_code,
-            "description": description,
-            "max_qty": str(int(max_qty)),
-            "prefix": prefix,
-            "allow_incomplete": "TRUE" if allow_incomplete else "FALSE",
-            "active": "TRUE" if active else "FALSE",
-        }
-        if existing.empty:
-            ws_materials.append_row([row_data[h] for h in SHEET_TEMPLATES["materials"]])
-            st.success("Material adaugat.")
+        if isinstance(ws_materials, FirestoreCollection):
+            row_data = {
+                "material_code": material_code,
+                "description": description,
+                "max_qty": int(max_qty),
+                "prefix": prefix,
+                "allow_incomplete": bool(allow_incomplete),
+                "active": bool(active),
+            }
+            ws_materials.set_doc(material_code, row_data)
+            st.success("Material salvat.")
         else:
-            row_idx = int(existing.iloc[0]["__row"])
-            update_row(ws_materials, row_idx, row_data)
-            st.success("Material actualizat.")
+            row_data = {
+                "material_code": material_code,
+                "description": description,
+                "max_qty": str(int(max_qty)),
+                "prefix": prefix,
+                "allow_incomplete": "TRUE" if allow_incomplete else "FALSE",
+                "active": "TRUE" if active else "FALSE",
+            }
+            if existing.empty:
+                ws_materials.append_row([row_data[h] for h in SHEET_TEMPLATES["materials"]])
+                st.success("Material adaugat.")
+            else:
+                row_idx = int(existing.iloc[0]["__row"])
+                update_row(ws_materials, row_idx, row_data)
+                st.success("Material actualizat.")
 
     st.markdown("---")
 
@@ -721,23 +896,27 @@ def main():
 
     st.markdown(f"# {APP_TITLE}")
 
+    fs_client = get_fs_client()
     apps_script_url = get_secret("GOOGLE_APPS_SCRIPT_URL")
     client = None if apps_script_url else get_gs_client()
     sheet_id = get_secret("GOOGLE_SHEET_ID")
     sheet_title = get_secret("GOOGLE_SHEET_TITLE", "PryPalScanner_Data")
 
-    if client is None and not apps_script_url:
+    if fs_client:
+        spreadsheet = FirestoreDatabase(fs_client)
+        created = False
+    elif apps_script_url:
+        spreadsheet = AppsScriptSpreadsheet(apps_script_url, sheet_id)
+        created = False
+    elif client:
+        spreadsheet, created = get_or_create_spreadsheet(client, sheet_id, sheet_title)
+    else:
         st.error(
-            "Google Sheets nu este configurat. Seteaza GOOGLE_SHEET_ID "
-            "sau GOOGLE_SHEET_TITLE si GOOGLE_SERVICE_ACCOUNT_JSON / FILE."
+            "Nu exista backend configurat. Seteaza FIREBASE_SERVICE_ACCOUNT_JSON "
+            "sau GOOGLE_APPS_SCRIPT_URL sau GOOGLE_SERVICE_ACCOUNT_JSON / FILE."
         )
         st.stop()
 
-    if apps_script_url:
-        spreadsheet = AppsScriptSpreadsheet(apps_script_url, sheet_id)
-        created = False
-    else:
-        spreadsheet, created = get_or_create_spreadsheet(client, sheet_id, sheet_title)
     if created:
         st.warning(
             f"Am creat un nou Google Sheet: {spreadsheet.title}. "

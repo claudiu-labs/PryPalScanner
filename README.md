@@ -20,6 +20,7 @@ Set one of these:
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (JSON string)
 - `GOOGLE_SERVICE_ACCOUNT_FILE` (path to json file)
 - OR `GOOGLE_APPS_SCRIPT_URL` (Apps Script Web App URL)
+- OR `FIREBASE_SERVICE_ACCOUNT_JSON` (Firestore, recommended for DB)
 - `GOOGLE_APPS_SCRIPT_KEY` (optional, if you enable API key check)
 
 Also set (one of the two):
@@ -37,6 +38,18 @@ export ADMIN_PASSWORD="your_password"
 ```
 
 Streamlit Cloud alternative: use `.streamlit/secrets.toml` with `gcp_service_account`.
+
+## 2c) Firestore alternative (recommended for DB)
+
+1) Firebase Console -> Project Settings -> Service Accounts
+2) Generate new private key (JSON)
+3) Put JSON in `.streamlit/secrets.toml`:
+
+```
+FIREBASE_SERVICE_ACCOUNT_JSON = """{ ... full json ... }"""
+```
+
+The app will automatically use Firestore if this secret is present.
 
 ## 2b) Apps Script alternative (no Service Account)
 
