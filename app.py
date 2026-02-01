@@ -36,6 +36,57 @@ except Exception:
 
 APP_TITLE = "PryPalScanner"
 
+TRANSLATIONS = {
+    "RO": {
+        "err_wrong_material": "Material gresit pe eticheta. Nu se poate inregistra pe paletul cu \"{material}\".",
+        "err_duplicate_current": "Tambur dublat pe acest palet. Va rugam verificati!",
+        "err_duplicate_historical": "Tamburul a existat si pe Palletul {pallet} din data de {date}. Va rugam verificati!",
+        "confirm_generate": "Aveti pe palet Max Qty / Pallet tamburi?",
+        "confirm_incomplete": "Sigur doriti sa finalizati paletul incomplet?",
+        "pallet_generated": "Palet generat cu succes!",
+        "pallet_incomplete_generated": "Palet incomplet generat.",
+        "info_continue_scan": "Continuati scanarea sau folositi Palet incomplet.",
+        "btn_yes": "DA",
+        "btn_no": "NU",
+        "btn_cancel": "Renunta",
+        "btn_generate": "Genereaza palet",
+        "btn_incomplete": "🟧 Palet incomplet",
+        "label_language": "Limba",
+        "label_admin": "Admin",
+        "label_login": "Conectare",
+        "label_password": "Parola",
+        "label_logout": "Logout",
+        "label_filter_material": "Filtru Material Code",
+        "email_subject": "{date} - Rebobinari \"{material}\" - {pallet}",
+        "email_header": "Material {material} - Pallet {pallet}",
+        "email_description": "Description: {description}",
+    },
+    "EN": {
+        "err_wrong_material": "Wrong Material label. You can't add this material on a pallet with Material code \"{material}\".",
+        "err_duplicate_current": "Drum Scanned Twice. Please check!",
+        "err_duplicate_historical": "This drum it's also scanned on {pallet} from {date}. Please Check!",
+        "confirm_generate": "Do you have Max Qty / Pallet on the pallet?",
+        "confirm_incomplete": "Are you sure to finalise incomplete pallet?",
+        "pallet_generated": "Pallet generated successfully!",
+        "pallet_incomplete_generated": "Incomplete pallet generated.",
+        "info_continue_scan": "Continue scanning or use Incomplete pallet.",
+        "btn_yes": "YES",
+        "btn_no": "NO",
+        "btn_cancel": "Cancel",
+        "btn_generate": "Generate pallet",
+        "btn_incomplete": "🟧 Incomplete pallet",
+        "label_language": "Language",
+        "label_admin": "Admin",
+        "label_login": "Login",
+        "label_password": "Password",
+        "label_logout": "Logout",
+        "label_filter_material": "Filter Material Code",
+        "email_subject": "{date} - Rewinding {material} - {pallet}",
+        "email_header": "Material {material} - Pallet {pallet}",
+        "email_description": "Description: {description}",
+    },
+}
+
 SHEET_TEMPLATES = {
     "materials": [
         "material_code",
@@ -93,6 +144,16 @@ def now_ts() -> str:
 
 def today_date() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d")
+
+def get_lang() -> str:
+    return st.session_state.get("lang", "RO")
+
+def t(key: str, **kwargs) -> str:
+    lang = get_lang()
+    text = TRANSLATIONS.get(lang, TRANSLATIONS["RO"]).get(key, key)
+    if kwargs:
+        return text.format(**kwargs)
+    return text
 
 
 def parse_qr(raw: str) -> dict:
@@ -152,13 +213,13 @@ def normalize_bool(value) -> bool:
     return str(value).strip().upper() in {"TRUE", "1", "YES", "Y"}
 
 def build_email_subject(material_code: str, pallet_id: str) -> str:
-    return f"{today_date()} - Rebobinari \"Material {material_code}\" - {pallet_id}"
+    return t("email_subject", date=today_date(), material=material_code, pallet=pallet_id)
 
 def build_email_body(material_code: str, description: str, pallet_id: str, drums_df: pd.DataFrame) -> str:
-    header = f"Material {material_code} - Pallet {pallet_id}"
+    header = t("email_header", material=material_code, pallet=pallet_id)
     lines = [header]
     if description:
-        lines.append(f"Description: {description}")
+        lines.append(t("email_description", description=description))
     lines.append("Drum Number | Standard Quantity")
     if drums_df is not None and not drums_df.empty:
         for _, row in drums_df.iterrows():
@@ -647,6 +708,24 @@ def operator_screen(spreadsheet):
                     st.session_state.selected_material = code
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("---")
+        footer_cols = st.columns([1, 1])
+        with footer_cols[0]:
+            if st.button(t("label_admin")):
+                st.session_state.auth_role = None
+                st.rerun()
+        with footer_cols[1]:
+            current = get_lang()
+            choice = st.selectbox(
+                t("label_language"),
+                ["RO", "EN"],
+                index=0 if current == "RO" else 1,
+                key="lang_select",
+            )
+            if choice != current:
+                st.session_state.lang = choice
+                st.rerun()
         return
 
     # Material screen
@@ -760,14 +839,12 @@ def operator_screen(spreadsheet):
                 return
 
             if material_input != selected:
-                st.error(
-                    f"Material gresit pe eticheta. Nu se poate inregistra pe paletul cu \"{selected}\"."
-                )
+                st.error(t("err_wrong_material", material=selected))
                 return
 
             # Duplicate checks
             if not active_drums.empty and drum_number in active_drums["drum_number"].tolist():
-                st.error("Tambur dublat pe acest palet. Va rugam verificati.")
+                st.error(t("err_duplicate_current"))
                 return
 
             existing = find_drum(ws_drums, drum_number)
@@ -776,9 +853,17 @@ def operator_screen(spreadsheet):
                 pallet_id = prior.get("pallet_id", "")
                 pallet_date = get_pallet_date(ws_pallets, pallet_id)
                 if pallet_date:
-                    msg = f"Tamburul a existat si pe Palletul {pallet_id or '(necunoscut)'} din data de {pallet_date}."
+                    msg = t(
+                        "err_duplicate_historical",
+                        pallet=pallet_id or "(necunoscut)",
+                        date=pallet_date,
+                    )
                 else:
-                    msg = f"Tamburul a existat si pe Palletul {pallet_id or '(necunoscut)'} in trecut."
+                    msg = t(
+                        "err_duplicate_historical",
+                        pallet=pallet_id or "(necunoscut)",
+                        date="N/A",
+                    )
                 st.error(msg)
                 return
 
@@ -824,59 +909,61 @@ def operator_screen(spreadsheet):
     if "confirm_incomplete" not in st.session_state:
         st.session_state.confirm_incomplete = False
 
-    if count >= max_qty and max_qty > 0:
-        if st.button("Genereaza palet", key="generate_pallet"):
-            st.session_state.confirm_generate = True
+    gen_disabled = not (count >= max_qty and max_qty > 0)
+    inc_disabled = count >= max_qty or count == 0
 
-        if st.session_state.confirm_generate:
-            st.warning("Aveti pe palet Max Qty / Pallet tamburi?")
-            col_yes, col_no = st.columns(2)
-            if col_yes.button("Da", key="confirm_gen_yes"):
-                settings = get_settings(ws_settings)
-                counter = int(settings.get("global_pallet_counter", "0"))
-                pallet_id = f"{prefix}{counter}"
+    if st.button(t("btn_generate"), key="generate_pallet", disabled=gen_disabled):
+        st.session_state.confirm_generate = True
 
-                active_drums = get_active_drums(ws_drums, selected)
-                for _, row in active_drums.iterrows():
-                    row_id = row["__doc_id"] if "__doc_id" in row else int(row["__row"])
-                    update_row(ws_drums, row_id, {"pallet_id": pallet_id, "status": "COMPLETED"})
+    if st.session_state.confirm_generate:
+        st.warning(t("confirm_generate"))
+        col_yes, col_no = st.columns(2)
+        if col_yes.button(t("btn_yes"), key="confirm_gen_yes"):
+            settings = get_settings(ws_settings)
+            counter = int(settings.get("global_pallet_counter", "0"))
+            pallet_id = f"{prefix}{counter}"
 
-                description = mat.get("description", "") or ""
-                email_subject = build_email_subject(selected, pallet_id)
-                email_body = build_email_body(selected, description, pallet_id, active_drums)
+            active_drums = get_active_drums(ws_drums, selected)
+            for _, row in active_drums.iterrows():
+                row_id = row["__doc_id"] if "__doc_id" in row else int(row["__row"])
+                update_row(ws_drums, row_id, {"pallet_id": pallet_id, "status": "COMPLETED"})
 
-                add_pallet(
-                    ws_pallets,
-                    pallet_id,
-                    {
-                        "pallet_id": pallet_id,
-                        "material_code": selected,
-                        "description": description,
-                        "created_at": now_ts(),
-                        "count": len(active_drums),
-                        "complete_type": "FULL",
-                        "email_subject": email_subject,
-                        "email_body": email_body,
-                    },
-                )
+            description = mat.get("description", "") or ""
+            email_subject = build_email_subject(selected, pallet_id)
+            email_body = build_email_body(selected, description, pallet_id, active_drums)
 
-                set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
-                st.session_state.confirm_generate = False
-                st.success("Palet generat cu succes.")
-                st.session_state.selected_material = None
-                st.rerun()
-            if col_no.button("Nu", key="confirm_gen_no"):
-                st.session_state.confirm_generate = False
-                st.info("Continuati scanarea sau folositi Palet incomplet.")
+            add_pallet(
+                ws_pallets,
+                pallet_id,
+                {
+                    "pallet_id": pallet_id,
+                    "material_code": selected,
+                    "description": description,
+                    "created_at": now_ts(),
+                    "count": len(active_drums),
+                    "complete_type": "FULL",
+                    "email_subject": email_subject,
+                    "email_body": email_body,
+                },
+            )
 
-    if allow_incomplete and count > 0:
-        if st.button("Palet incomplet", key="incomplete_pallet"):
+            set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+            st.session_state.confirm_generate = False
+            st.success(t("pallet_generated"))
+            st.session_state.selected_material = None
+            st.rerun()
+        if col_no.button(t("btn_no"), key="confirm_gen_no"):
+            st.session_state.confirm_generate = False
+            st.info(t("info_continue_scan"))
+
+    if allow_incomplete:
+        if st.button(t("btn_incomplete"), key="incomplete_pallet", disabled=inc_disabled):
             st.session_state.confirm_incomplete = True
 
         if st.session_state.confirm_incomplete:
-            st.warning("Confirmati finalizare palet incomplet?")
+            st.warning(t("confirm_incomplete"))
             col_yes, col_no = st.columns(2)
-            if col_yes.button("Da", key="confirm_inc_yes"):
+            if col_yes.button(t("btn_yes"), key="confirm_inc_yes"):
                 settings = get_settings(ws_settings)
                 counter = int(settings.get("global_pallet_counter", "0"))
                 pallet_id = f"{prefix}{counter}"
@@ -907,10 +994,10 @@ def operator_screen(spreadsheet):
 
                 set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
                 st.session_state.confirm_incomplete = False
-                st.success("Palet incomplet generat.")
+                st.success(t("pallet_incomplete_generated"))
                 st.session_state.selected_material = None
                 st.rerun()
-            if col_no.button("Nu", key="confirm_inc_no"):
+            if col_no.button(t("btn_cancel"), key="confirm_inc_no"):
                 st.session_state.confirm_incomplete = False
 
 
@@ -991,6 +1078,7 @@ def admin_screen(spreadsheet):
 
     # Date filters
     date_filter = st.selectbox("Filtru data", ["Toate", "Astazi", "Luna curenta", "An curent", "Interval"])
+    material_filter = st.text_input(t("label_filter_material"))
     start_date = None
     end_date = None
     if date_filter == "Interval":
@@ -1017,6 +1105,11 @@ def admin_screen(spreadsheet):
 
     pallets_view = apply_date_filter(pallets_df, "created_at") if not pallets_df.empty else pallets_df
     drums_view = apply_date_filter(drums_df, "timestamp") if not drums_df.empty else drums_df
+    if material_filter:
+        if not pallets_view.empty and "material_code" in pallets_view.columns:
+            pallets_view = pallets_view[pallets_view["material_code"].astype(str).str.contains(material_filter, case=False, na=False)]
+        if not drums_view.empty and "material_code" in drums_view.columns:
+            drums_view = drums_view[drums_view["material_code"].astype(str).str.contains(material_filter, case=False, na=False)]
 
     if not pallets_view.empty:
         st.dataframe(pallets_view.drop(columns=["__row"], errors="ignore"), use_container_width=True)
@@ -1072,9 +1165,12 @@ def main():
     if "username" not in st.session_state:
         st.session_state.username = ""
 
+    if "lang" not in st.session_state:
+        st.session_state.lang = "RO"
+
     if not st.session_state.auth_role:
-        st.markdown("## Conectare")
-        password = st.text_input("Parola", type="password")
+        st.markdown(f"## {t('label_login')}")
+        password = st.text_input(t("label_password"), type="password")
         if st.button("Login"):
             operator_pw = get_secret("OPERATOR_PASSWORD", "PryPass2026")
             admin_pw = get_secret("ADMIN_PASSWORD", "PryAdmin2026")
