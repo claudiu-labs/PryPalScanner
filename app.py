@@ -515,13 +515,18 @@ def update_row(ws, row_idx: int, updates: dict):
 
 # -------------------- Data Helpers --------------------
 
+@st.cache_data(ttl=10, show_spinner=False, hash_funcs={FirestoreCollection: lambda _: "firestore"})
+def _get_settings_cached(ws_settings) -> dict:
+    doc = ws_settings.get_doc("global")
+    if not doc.exists:
+        return {}
+    data = doc.to_dict() or {}
+    return {k: str(v) for k, v in data.items()}
+
+
 def get_settings(ws_settings) -> dict:
     if isinstance(ws_settings, FirestoreCollection):
-        doc = ws_settings.get_doc("global")
-        if not doc.exists:
-            return {}
-        data = doc.to_dict() or {}
-        return {k: str(v) for k, v in data.items()}
+        return _get_settings_cached(ws_settings)
     df = load_sheet(ws_settings)
     if df.empty:
         return {}
@@ -535,6 +540,7 @@ def set_setting(ws_settings, key: str, value: str):
         except Exception:
             value_cast = value
         ws_settings.update_doc("global", {key: value_cast})
+        clear_cached_data()
         return
     df = load_sheet(ws_settings)
     if df.empty:
@@ -548,7 +554,8 @@ def set_setting(ws_settings, key: str, value: str):
         update_row(ws_settings, row_idx, {"value": value})
 
 
-def get_materials(ws_materials) -> pd.DataFrame:
+@st.cache_data(ttl=10, show_spinner=False, hash_funcs={FirestoreCollection: lambda _: "firestore"})
+def _get_materials_cached(ws_materials) -> pd.DataFrame:
     df = load_sheet(ws_materials)
     if df.empty:
         return df
@@ -561,20 +568,40 @@ def get_materials(ws_materials) -> pd.DataFrame:
     return df
 
 
+def get_materials(ws_materials) -> pd.DataFrame:
+    if isinstance(ws_materials, FirestoreCollection):
+        return _get_materials_cached(ws_materials)
+    df = load_sheet(ws_materials)
+    if df.empty:
+        return df
+    if "material_code" not in df.columns and "__doc_id" in df.columns:
+        df["material_code"] = df["__doc_id"]
+    if "active" in df.columns:
+        df["active"] = df["active"].apply(normalize_bool)
+    else:
+        df["active"] = True
+    return df
+
+
+@st.cache_data(ttl=5, show_spinner=False, hash_funcs={FirestoreCollection: lambda _: "firestore"})
+def _get_active_drums_cached(ws_drums, material_code: str) -> pd.DataFrame:
+    docs = ws_drums.query([
+        ("material_code", "==", material_code),
+        ("status", "==", "ACTIVE"),
+    ])
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data["__doc_id"] = doc.id
+        rows.append(data)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 def get_active_drums(ws_drums, material_code: str) -> pd.DataFrame:
     if isinstance(ws_drums, FirestoreCollection):
-        docs = ws_drums.query([
-            ("material_code", "==", material_code),
-            ("status", "==", "ACTIVE"),
-        ])
-        rows = []
-        for doc in docs:
-            data = doc.to_dict() or {}
-            data["__doc_id"] = doc.id
-            rows.append(data)
-        if not rows:
-            return pd.DataFrame()
-        return pd.DataFrame(rows)
+        return _get_active_drums_cached(ws_drums, material_code)
     df = load_sheet(ws_drums)
     if df.empty:
         return df
@@ -1161,6 +1188,7 @@ def admin_screen(spreadsheet):
                 "active": bool(active),
             }
             ws_materials.set_doc(material_code, row_data)
+            clear_cached_data()
             st.success("Material salvat.")
         else:
             row_data = {
@@ -1173,18 +1201,24 @@ def admin_screen(spreadsheet):
             }
             if existing.empty:
                 ws_materials.append_row([row_data[h] for h in SHEET_TEMPLATES["materials"]])
+                clear_cached_data()
                 st.success("Material adaugat.")
             else:
                 row_idx = int(existing.iloc[0]["__row"])
                 update_row(ws_materials, row_idx, row_data)
+                clear_cached_data()
                 st.success("Material actualizat.")
 
     st.markdown("---")
 
     # History / Search
     st.markdown("### History & Reports")
-    pallets_df = load_sheet(ws_pallets)
-    drums_df = load_sheet(ws_drums)
+    load_history = st.checkbox("Incarca history (poate dura)")
+    pallets_df = pd.DataFrame()
+    drums_df = pd.DataFrame()
+    if load_history:
+        pallets_df = load_sheet(ws_pallets)
+        drums_df = load_sheet(ws_drums)
 
     # Date filters
     date_filter = st.selectbox("Filtru data", ["Toate", "Astazi", "Luna curenta", "An curent", "Interval"])
