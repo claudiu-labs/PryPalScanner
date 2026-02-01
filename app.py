@@ -1,0 +1,693 @@
+import json
+import os
+import re
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception as exc:  # pragma: no cover - runtime dependency
+    gspread = None
+    Credentials = None
+
+# Optional OCR (works only if tesseract is installed on the host)
+try:
+    import pytesseract
+    from PIL import Image
+except Exception:
+    pytesseract = None
+    Image = None
+
+APP_TITLE = "PryPalScanner"
+
+SHEET_TEMPLATES = {
+    "materials": [
+        "material_code",
+        "description",
+        "max_qty",
+        "prefix",
+        "allow_incomplete",
+        "active",
+    ],
+    "settings": ["key", "value"],
+    "drums": [
+        "timestamp",
+        "material_code",
+        "drum_number",
+        "drum_type",
+        "standard_qty",
+        "pallet_id",
+        "status",
+        "device_id",
+        "operator",
+    ],
+    "pallets": [
+        "pallet_id",
+        "material_code",
+        "created_at",
+        "count",
+        "complete_type",
+    ],
+}
+
+
+# -------------------- Utilities --------------------
+
+def get_secret(key: str, default: str | None = None) -> str | None:
+    if key in st.secrets:
+        return st.secrets[key]
+    return os.getenv(key, default)
+
+
+def now_ts() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_qr(raw: str) -> dict:
+    # Example: "DWP1500_LV 15518289"
+    raw = raw.strip()
+    drum_number = None
+    match = re.search(r"(\d{5,})", raw)
+    if match:
+        drum_number = match.group(1)
+    return {
+        "raw": raw,
+        "drum_type": raw,
+        "drum_number": drum_number,
+    }
+
+
+def extract_ocr_fields(image_bytes: bytes, drum_number: str | None) -> dict:
+    if pytesseract is None or Image is None:
+        return {"material_code": None, "standard_qty": None, "raw_text": None}
+    try:
+        img = Image.open(image_bytes)
+        text = pytesseract.image_to_string(img)
+    except Exception:
+        return {"material_code": None, "standard_qty": None, "raw_text": None}
+
+    numbers = re.findall(r"\d+", text)
+    numbers = [n for n in numbers if n != (drum_number or "")]
+
+    material_code = None
+    standard_qty = None
+
+    # Heuristic: material code often 8 digits (e.g., 60115949)
+    for n in numbers:
+        if len(n) == 8:
+            material_code = n
+            break
+
+    # Standard quantity: first remaining numeric value not 8 digits
+    for n in numbers:
+        if n != material_code and len(n) < 8:
+            standard_qty = n
+            break
+
+    return {
+        "material_code": material_code,
+        "standard_qty": standard_qty,
+        "raw_text": text,
+    }
+
+
+# -------------------- Google Sheets --------------------
+
+@st.cache_resource
+def get_gs_client():
+    if gspread is None or Credentials is None:
+        return None
+
+    sa_json = get_secret("GOOGLE_SERVICE_ACCOUNT_JSON")
+    sa_file = get_secret("GOOGLE_SERVICE_ACCOUNT_FILE")
+
+    if sa_json:
+        info = json.loads(sa_json)
+    elif sa_file:
+        with open(sa_file, "r", encoding="utf-8") as f:
+            info = json.load(f)
+    elif "gcp_service_account" in st.secrets:
+        info = st.secrets["gcp_service_account"]
+    else:
+        return None
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+
+def ensure_worksheet(spreadsheet, name: str, headers: list[str]):
+    try:
+        ws = spreadsheet.worksheet(name)
+    except Exception:
+        ws = spreadsheet.add_worksheet(title=name, rows="1000", cols=str(len(headers)))
+        ws.append_row(headers)
+        return ws
+
+    # Ensure headers exist
+    existing = ws.row_values(1)
+    if existing != headers:
+        # If sheet empty, set headers
+        if not existing:
+            ws.append_row(headers)
+        else:
+            # Keep existing headers to avoid data loss
+            pass
+    return ws
+
+
+def load_sheet(ws) -> pd.DataFrame:
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+    headers = values[0]
+    rows = values[1:]
+    df = pd.DataFrame(rows, columns=headers)
+    df["__row"] = range(2, len(rows) + 2)
+    return df
+
+
+def get_header_map(ws) -> dict:
+    headers = ws.row_values(1)
+    return {h: i + 1 for i, h in enumerate(headers)}
+
+
+def update_row(ws, row_idx: int, updates: dict):
+    header_map = get_header_map(ws)
+    for key, val in updates.items():
+        col = header_map.get(key)
+        if col:
+            ws.update_cell(row_idx, col, val)
+
+
+# -------------------- Data Helpers --------------------
+
+def get_settings(ws_settings) -> dict:
+    df = load_sheet(ws_settings)
+    if df.empty:
+        return {}
+    return {row["key"]: row["value"] for _, row in df.iterrows()}
+
+
+def set_setting(ws_settings, key: str, value: str):
+    df = load_sheet(ws_settings)
+    if df.empty:
+        ws_settings.append_row([key, value])
+        return
+    row = df[df["key"] == key]
+    if row.empty:
+        ws_settings.append_row([key, value])
+    else:
+        row_idx = int(row.iloc[0]["__row"])
+        update_row(ws_settings, row_idx, {"value": value})
+
+
+def get_materials(ws_materials) -> pd.DataFrame:
+    df = load_sheet(ws_materials)
+    if df.empty:
+        return df
+    # Normalize
+    df["active"] = df["active"].str.upper().fillna("TRUE")
+    return df
+
+
+def get_active_drums(ws_drums, material_code: str) -> pd.DataFrame:
+    df = load_sheet(ws_drums)
+    if df.empty:
+        return df
+    return df[
+        (df["material_code"] == material_code)
+        & (df["status"] == "ACTIVE")
+    ]
+
+
+def find_drum(ws_drums, drum_number: str) -> pd.DataFrame:
+    df = load_sheet(ws_drums)
+    if df.empty:
+        return df
+    return df[df["drum_number"] == drum_number]
+
+
+def add_drum(ws_drums, row: dict):
+    headers = ws_drums.row_values(1)
+    ws_drums.append_row([row.get(h, "") for h in headers])
+
+
+def delete_row(ws, row_idx: int):
+    ws.delete_rows(row_idx)
+
+
+# -------------------- UI Helpers --------------------
+
+def inject_css():
+    st.markdown(
+        """
+<style>
+:root {
+  --bg: #f6f2ea;
+  --card: #ffffff;
+  --primary: #1f6f8b;
+  --accent: #f2a365;
+  --ok: #2a9d8f;
+  --warn: #e9c46a;
+  --danger: #e76f51;
+  --text: #1f2937;
+}
+html, body, [class*="st-"] { font-family: 'Rubik', 'Segoe UI', sans-serif; }
+body { background: linear-gradient(180deg, var(--bg) 0%, #ffffff 100%); }
+section.main > div { padding-top: 0.75rem; }
+.stButton > button {
+  width: 100%;
+  padding: 1.2rem 1rem;
+  border-radius: 16px;
+  border: 0;
+  background: var(--primary);
+  color: white;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.stButton > button:hover { background: #165a72; }
+.status-pill {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #1f2937;
+  background: var(--warn);
+}
+.status-green { background: var(--ok); color: white; }
+.status-yellow { background: var(--warn); }
+.status-full { background: var(--accent); color: #1f2937; }
+.card {
+  background: var(--card);
+  border-radius: 16px;
+  padding: 1rem;
+  box-shadow: 0 8px 24px rgba(31,41,55,0.08);
+}
+input[type="text"], input[type="number"] {
+  font-size: 1.05rem !important;
+}
+@media (max-width: 768px) {
+  .stButton > button { font-size: 1.05rem; padding: 1.1rem; }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def wake_lock_script():
+    st.components.v1.html(
+        """
+<script>
+(async () => {
+  try {
+    if ('wakeLock' in navigator) {
+      await navigator.wakeLock.request('screen');
+    }
+  } catch (e) {}
+})();
+</script>
+""",
+        height=0,
+    )
+
+
+# -------------------- Main App --------------------
+
+def operator_screen(spreadsheet):
+    ws_materials = ensure_worksheet(spreadsheet, "materials", SHEET_TEMPLATES["materials"])
+    ws_settings = ensure_worksheet(spreadsheet, "settings", SHEET_TEMPLATES["settings"])
+    ws_drums = ensure_worksheet(spreadsheet, "drums", SHEET_TEMPLATES["drums"])
+    ws_pallets = ensure_worksheet(spreadsheet, "pallets", SHEET_TEMPLATES["pallets"])
+
+    materials_df = get_materials(ws_materials)
+    active_materials = materials_df[materials_df["active"].str.upper() != "FALSE"] if not materials_df.empty else pd.DataFrame()
+
+    wake_lock_script()
+
+    if "selected_material" not in st.session_state:
+        st.session_state.selected_material = None
+
+    if st.session_state.selected_material is None:
+        st.markdown(f"## {APP_TITLE}")
+        st.markdown("Selecteaza materialul pentru palet.")
+
+        if active_materials.empty:
+            st.warning("Nu exista materiale active. Contacteaza admin.")
+            return
+
+        cols = st.columns(2)
+        for idx, (_, row) in enumerate(active_materials.iterrows()):
+            code = row["material_code"]
+            description = row.get("description", "")
+            try:
+                max_qty = int(row.get("max_qty") or 0)
+            except Exception:
+                max_qty = 0
+            active_drums = get_active_drums(ws_drums, code)
+            count = len(active_drums)
+
+            if count == 0:
+                status = "GREEN"
+                status_label = "Empty"
+            elif count < max_qty:
+                status = "YELLOW"
+                status_label = "In progress"
+            else:
+                status = "FULL"
+                status_label = "Full"
+
+            pill_class = "status-green" if status == "GREEN" else "status-yellow" if status == "YELLOW" else "status-full"
+
+            with cols[idx % 2]:
+                st.markdown(f"<div class='card'>", unsafe_allow_html=True)
+                st.markdown(f"<span class='status-pill {pill_class}'>{status_label}</span>", unsafe_allow_html=True)
+                st.markdown(f"### Material {code}")
+                if description:
+                    st.markdown(f"_{description}_")
+                st.markdown(f"**{count} / {max_qty}**")
+                if st.button(f"Deschide {code}", key=f"open_{code}"):
+                    st.session_state.selected_material = code
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    # Material screen
+    selected = st.session_state.selected_material
+    row = materials_df[materials_df["material_code"] == selected]
+    if row.empty:
+        st.error("Material invalid.")
+        st.session_state.selected_material = None
+        return
+
+    mat = row.iloc[0]
+    try:
+        max_qty = int(mat.get("max_qty") or 0)
+    except Exception:
+        max_qty = 0
+    prefix = mat.get("prefix", "") or ""
+    allow_incomplete = str(mat.get("allow_incomplete", "FALSE")).upper() == "TRUE"
+
+    active_drums = get_active_drums(ws_drums, selected)
+    count = len(active_drums)
+
+    st.markdown(f"## Material {selected}")
+    st.markdown(f"**{count} / {max_qty}**")
+
+    if st.button("Inapoi la lista", key="back_to_list"):
+        st.session_state.selected_material = None
+        st.rerun()
+
+    st.markdown("---")
+
+    # List of scanned drums
+    st.markdown("### Tamburi scanati (palet curent)")
+    if active_drums.empty:
+        st.info("Palet gol.")
+    else:
+        st.dataframe(active_drums[["drum_number", "standard_qty", "timestamp"]], use_container_width=True)
+
+    # Scan input
+    st.markdown("### Scanare")
+    st.caption("Foloseste scanerul Zebra. Inputul trebuie sa fie focusat.")
+
+    if "pending_scan" not in st.session_state:
+        st.session_state.pending_scan = None
+
+    scan_raw = st.text_input("Scan QR (Drum Type + Drum Number)", key="scan_input")
+
+    if scan_raw:
+        parsed = parse_qr(scan_raw)
+        st.session_state.pending_scan = parsed
+        st.session_state.scan_input = ""
+        st.rerun()
+
+    pending = st.session_state.get("pending_scan")
+
+    if pending:
+        st.markdown("### Confirmare eticheta")
+
+        with st.form("confirm_scan"):
+            st.markdown(f"**Drum Number:** {pending.get('drum_number') or 'N/A'}")
+            std_qty = st.text_input("Standard Quantity (editabil)", key="std_qty")
+            material_input = st.text_input("Material code (din eticheta)", key="material_code_input")
+
+            use_camera = st.checkbox("Foloseste camera pentru OCR (optional)")
+            ocr_material = None
+            ocr_qty = None
+            if use_camera:
+                photo = st.camera_input("Foto eticheta")
+                if photo is not None:
+                    ocr = extract_ocr_fields(photo, pending.get("drum_number"))
+                    ocr_material = ocr.get("material_code")
+                    ocr_qty = ocr.get("standard_qty")
+                    st.caption("OCR rezultat (verifica manual):")
+                    st.write({"material_code": ocr_material, "standard_qty": ocr_qty})
+
+            submit = st.form_submit_button("Salveaza")
+
+        if submit:
+            drum_number = pending.get("drum_number")
+            if not drum_number:
+                st.error("Nu pot extrage Drum Number din QR.")
+                return
+
+            # Use OCR fallback if inputs empty
+            if not material_input and ocr_material:
+                material_input = ocr_material
+            if not std_qty and ocr_qty:
+                std_qty = ocr_qty
+
+            if not material_input:
+                st.error("Material lipsa. Scaneaza materialul sau foloseste OCR.")
+                return
+
+            if material_input != selected:
+                st.error(
+                    f"Material gresit pe eticheta. Nu se poate inregistra pe paletul cu '{selected}'."
+                )
+                return
+
+            # Duplicate checks
+            if not active_drums.empty and drum_number in active_drums["drum_number"].tolist():
+                st.error("Tambur dublat pe acest palet. Va rugam verificati.")
+                return
+
+            existing = find_drum(ws_drums, drum_number)
+            if not existing.empty:
+                prior = existing.iloc[0]
+                pallet_id = prior.get("pallet_id", "")
+                msg = f"Tamburul a existat si pe Palletul {pallet_id or '(necunoscut)'} in trecut."
+                st.error(msg)
+                return
+
+            # Save
+            add_drum(
+                ws_drums,
+                {
+                    "timestamp": now_ts(),
+                    "material_code": selected,
+                    "drum_number": drum_number,
+                    "drum_type": pending.get("drum_type"),
+                    "standard_qty": std_qty,
+                    "pallet_id": "",
+                    "status": "ACTIVE",
+                    "device_id": get_secret("DEVICE_ID", ""),
+                    "operator": get_secret("OPERATOR", ""),
+                },
+            )
+            st.session_state.pending_scan = None
+            st.success("Scan salvat.")
+            st.rerun()
+
+    # Undo last scan
+    if st.button("Undo last scan", key="undo_scan"):
+        active_drums = get_active_drums(ws_drums, selected)
+        if active_drums.empty:
+            st.info("Nu exista scanari active.")
+        else:
+            last_row = int(active_drums["__row"].max())
+            delete_row(ws_drums, last_row)
+            st.success("Ultimul tambur a fost sters.")
+            st.rerun()
+
+    st.markdown("---")
+
+    # Pallet generation
+    if count >= max_qty and max_qty > 0:
+        if st.button("Genereaza palet", key="generate_pallet"):
+            settings = get_settings(ws_settings)
+            counter = int(settings.get("global_pallet_counter", "0"))
+            pallet_id = f"{prefix}{counter}"
+
+            # Update active drums with pallet_id
+            active_drums = get_active_drums(ws_drums, selected)
+            for _, row in active_drums.iterrows():
+                update_row(ws_drums, int(row["__row"]), {"pallet_id": pallet_id, "status": "COMPLETED"})
+
+            ws_pallets.append_row(
+                [pallet_id, selected, now_ts(), str(len(active_drums)), "FULL"]
+            )
+
+            set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+            st.success("Palet generat cu succes.")
+            st.session_state.selected_material = None
+            st.rerun()
+
+    elif allow_incomplete and count > 0:
+        if st.button("Palet incomplet", key="incomplete_pallet"):
+            settings = get_settings(ws_settings)
+            counter = int(settings.get("global_pallet_counter", "0"))
+            pallet_id = f"{prefix}{counter}"
+
+            active_drums = get_active_drums(ws_drums, selected)
+            for _, row in active_drums.iterrows():
+                update_row(ws_drums, int(row["__row"]), {"pallet_id": pallet_id, "status": "COMPLETED"})
+
+            ws_pallets.append_row(
+                [pallet_id, selected, now_ts(), str(len(active_drums)), "INCOMPLETE"]
+            )
+
+            set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+            st.success("Palet incomplet generat.")
+            st.session_state.selected_material = None
+            st.rerun()
+
+
+# -------------------- Admin Screen --------------------
+
+def admin_screen(spreadsheet):
+    ws_materials = ensure_worksheet(spreadsheet, "materials", SHEET_TEMPLATES["materials"])
+    ws_settings = ensure_worksheet(spreadsheet, "settings", SHEET_TEMPLATES["settings"])
+    ws_drums = ensure_worksheet(spreadsheet, "drums", SHEET_TEMPLATES["drums"])
+    ws_pallets = ensure_worksheet(spreadsheet, "pallets", SHEET_TEMPLATES["pallets"])
+
+    st.markdown(f"## {APP_TITLE} - Admin")
+
+    # Settings
+    settings = get_settings(ws_settings)
+    current_counter = settings.get("global_pallet_counter", "0")
+    with st.form("settings_form"):
+        new_counter = st.text_input("Global pallet counter", value=current_counter)
+        save_settings = st.form_submit_button("Salveaza setari")
+    if save_settings:
+        set_setting(ws_settings, "global_pallet_counter", new_counter)
+        st.success("Setari salvate.")
+
+    st.markdown("---")
+
+    # Materials management
+    st.markdown("### Materiale")
+    materials_df = get_materials(ws_materials)
+    if not materials_df.empty:
+        st.dataframe(materials_df.drop(columns=["__row"], errors="ignore"), use_container_width=True)
+
+    with st.form("material_form"):
+        material_code = st.text_input("Material code")
+        description = st.text_input("Description")
+        max_qty = st.number_input("Max qty / pallet", min_value=1, step=1)
+        prefix = st.text_input("Prefix (optional)")
+        allow_incomplete = st.checkbox("Allow incomplete pallet")
+        active = st.checkbox("Active", value=True)
+        save_material = st.form_submit_button("Adauga / Update")
+
+    if save_material:
+        df = get_materials(ws_materials)
+        existing = df[df["material_code"] == material_code] if not df.empty else pd.DataFrame()
+        row_data = {
+            "material_code": material_code,
+            "description": description,
+            "max_qty": str(int(max_qty)),
+            "prefix": prefix,
+            "allow_incomplete": "TRUE" if allow_incomplete else "FALSE",
+            "active": "TRUE" if active else "FALSE",
+        }
+        if existing.empty:
+            ws_materials.append_row([row_data[h] for h in SHEET_TEMPLATES["materials"]])
+            st.success("Material adaugat.")
+        else:
+            row_idx = int(existing.iloc[0]["__row"])
+            update_row(ws_materials, row_idx, row_data)
+            st.success("Material actualizat.")
+
+    st.markdown("---")
+
+    # History / Search
+    st.markdown("### History & Search")
+    pallets_df = load_sheet(ws_pallets)
+    drums_df = load_sheet(ws_drums)
+
+    if not pallets_df.empty:
+        st.dataframe(pallets_df.drop(columns=["__row"], errors="ignore"), use_container_width=True)
+
+    search_drum = st.text_input("Cauta drum number")
+    if search_drum:
+        result = drums_df[drums_df["drum_number"] == search_drum] if not drums_df.empty else pd.DataFrame()
+        if result.empty:
+            st.info("Nu exista acest drum number.")
+        else:
+            st.dataframe(result.drop(columns=["__row"], errors="ignore"), use_container_width=True)
+
+
+def main():
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    inject_css()
+
+    st.markdown(f"# {APP_TITLE}")
+
+    client = get_gs_client()
+    sheet_id = get_secret("GOOGLE_SHEET_ID")
+
+    if client is None or not sheet_id:
+        st.error(
+            "Google Sheets nu este configurat. Seteaza GOOGLE_SHEET_ID si GOOGLE_SERVICE_ACCOUNT_JSON / FILE."
+        )
+        st.stop()
+
+    spreadsheet = client.open_by_key(sheet_id)
+
+    if "admin_mode" not in st.session_state:
+        st.session_state.admin_mode = False
+    if "admin_logged" not in st.session_state:
+        st.session_state.admin_logged = False
+
+    if st.session_state.admin_mode and not st.session_state.admin_logged:
+        st.markdown("## Admin login")
+        pw = st.text_input("Parola admin", type="password")
+        if st.button("Login"):
+            if pw == get_secret("ADMIN_PASSWORD", ""):
+                st.session_state.admin_logged = True
+                st.rerun()
+            else:
+                st.error("Parola gresita.")
+        if st.button("Inapoi"):
+            st.session_state.admin_mode = False
+            st.rerun()
+        return
+
+    if st.session_state.admin_mode and st.session_state.admin_logged:
+        if st.button("Iesire admin"):
+            st.session_state.admin_mode = False
+            st.session_state.admin_logged = False
+            st.rerun()
+        admin_screen(spreadsheet)
+        return
+
+    operator_screen(spreadsheet)
+
+    st.markdown("---")
+    if st.button("Admin"):
+        st.session_state.admin_mode = True
+        st.rerun()
+
+
+if __name__ == "__main__":
+    main()
