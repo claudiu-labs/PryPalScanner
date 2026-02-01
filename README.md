@@ -19,6 +19,7 @@ Set one of these:
 
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (JSON string)
 - `GOOGLE_SERVICE_ACCOUNT_FILE` (path to json file)
+- OR `GOOGLE_APPS_SCRIPT_URL` (Apps Script Web App URL)
 
 Also set (one of the two):
 
@@ -35,6 +36,68 @@ export ADMIN_PASSWORD="your_password"
 ```
 
 Streamlit Cloud alternative: use `.streamlit/secrets.toml` with `gcp_service_account`.
+
+## 2b) Apps Script alternative (no Service Account)
+
+Use this if you don't want Google Cloud credentials. Create a bound Apps Script:
+
+1) Open your Google Sheet
+2) Extensions -> Apps Script
+3) Paste this script and deploy as Web App (Execute as: Me, Access: Anyone)
+
+```
+function doPost(e) {
+  var body = JSON.parse(e.postData.contents || '{}');
+  var action = body.action;
+  var sheetName = body.sheet;
+  var ss = body.sheetId ? SpreadsheetApp.openById(body.sheetId) : SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(sheetName);
+
+  function out(obj) {
+    return ContentService.createTextOutput(JSON.stringify(obj))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (action === 'ensure') {
+    if (!sh) sh = ss.insertSheet(sheetName);
+    var headers = body.headers || [];
+    if (sh.getLastRow() === 0 && headers.length) {
+      sh.appendRow(headers);
+    }
+    return out({ok: true});
+  }
+
+  if (!sh) return out({ok: false, error: 'Sheet not found'});
+
+  if (action === 'get') {
+    return out({ok: true, values: sh.getDataRange().getValues()});
+  }
+  if (action === 'row') {
+    var row = body.row || 1;
+    var values = sh.getRange(row, 1, 1, sh.getLastColumn()).getValues()[0];
+    return out({ok: true, values: values});
+  }
+  if (action === 'append') {
+    sh.appendRow(body.values || []);
+    return out({ok: true});
+  }
+  if (action === 'update') {
+    sh.getRange(body.row, body.col).setValue(body.value);
+    return out({ok: true});
+  }
+  if (action === 'delete') {
+    sh.deleteRow(body.row);
+    return out({ok: true});
+  }
+
+  return out({ok: false, error: 'Unknown action'});
+}
+```
+
+Then set:
+```
+GOOGLE_APPS_SCRIPT_URL = "https://script.google.com/macros/s/XXXX/exec"
+```
 
 ## 3) Zebra DataWedge (Browser mode)
 

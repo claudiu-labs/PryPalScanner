@@ -2,6 +2,8 @@ import json
 import os
 import re
 from datetime import datetime
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 import pandas as pd
 import streamlit as st
@@ -143,6 +145,60 @@ def get_gs_client():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
+def apps_script_call(url: str, payload: dict) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        raise RuntimeError(f"Apps Script error: {exc.code}") from exc
+    except URLError as exc:
+        raise RuntimeError("Apps Script unreachable") from exc
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Apps Script invalid response") from exc
+
+class AppsScriptSpreadsheet:
+    def __init__(self, url: str, sheet_id: str | None = None):
+        self.url = url
+        self.sheet_id = sheet_id
+
+    def worksheet(self, name: str):
+        return AppsScriptWorksheet(self, name)
+
+class AppsScriptWorksheet:
+    def __init__(self, spreadsheet: AppsScriptSpreadsheet, name: str):
+        self.spreadsheet = spreadsheet
+        self.name = name
+
+    def _call(self, action: str, **extra):
+        payload = {
+            "action": action,
+            "sheet": self.name,
+            "sheetId": self.spreadsheet.sheet_id,
+        }
+        payload.update(extra)
+        return apps_script_call(self.spreadsheet.url, payload)
+
+    def get_all_values(self):
+        res = self._call("get")
+        return res.get("values", [])
+
+    def row_values(self, row: int):
+        res = self._call("row", row=row)
+        return res.get("values", [])
+
+    def append_row(self, values: list):
+        return self._call("append", values=values)
+
+    def update_cell(self, row: int, col: int, value):
+        return self._call("update", row=row, col=col, value=value)
+
+    def delete_rows(self, row: int):
+        return self._call("delete", row=row)
+
 def get_or_create_spreadsheet(client, sheet_id: str | None, title: str | None):
     if sheet_id:
         try:
@@ -160,6 +216,13 @@ def get_or_create_spreadsheet(client, sheet_id: str | None, title: str | None):
 
 
 def ensure_worksheet(spreadsheet, name: str, headers: list[str]):
+    # Apps Script backend
+    if isinstance(spreadsheet, AppsScriptSpreadsheet):
+        ws = spreadsheet.worksheet(name)
+        ws._call("ensure", headers=headers)
+        return ws
+
+    # gspread backend
     try:
         ws = spreadsheet.worksheet(name)
     except Exception:
@@ -167,15 +230,10 @@ def ensure_worksheet(spreadsheet, name: str, headers: list[str]):
         ws.append_row(headers)
         return ws
 
-    # Ensure headers exist
     existing = ws.row_values(1)
     if existing != headers:
-        # If sheet empty, set headers
         if not existing:
             ws.append_row(headers)
-        else:
-            # Keep existing headers to avoid data loss
-            pass
     return ws
 
 
@@ -660,18 +718,23 @@ def main():
 
     st.markdown(f"# {APP_TITLE}")
 
-    client = get_gs_client()
+    apps_script_url = get_secret("GOOGLE_APPS_SCRIPT_URL")
+    client = None if apps_script_url else get_gs_client()
     sheet_id = get_secret("GOOGLE_SHEET_ID")
     sheet_title = get_secret("GOOGLE_SHEET_TITLE", "PryPalScanner_Data")
 
-    if client is None:
+    if client is None and not apps_script_url:
         st.error(
             "Google Sheets nu este configurat. Seteaza GOOGLE_SHEET_ID "
             "sau GOOGLE_SHEET_TITLE si GOOGLE_SERVICE_ACCOUNT_JSON / FILE."
         )
         st.stop()
 
-    spreadsheet, created = get_or_create_spreadsheet(client, sheet_id, sheet_title)
+    if apps_script_url:
+        spreadsheet = AppsScriptSpreadsheet(apps_script_url, sheet_id)
+        created = False
+    else:
+        spreadsheet, created = get_or_create_spreadsheet(client, sheet_id, sheet_title)
     if created:
         st.warning(
             f"Am creat un nou Google Sheet: {spreadsheet.title}. "
