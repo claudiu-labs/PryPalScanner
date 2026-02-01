@@ -212,3 +212,15 @@ Collections:
 ---
 
 If you want email sending, we can add SMTP queue + retry in a later step.
+
+## 10) Android APK (WebView wrapper)
+
+There is a minimal Android app in `android-app/` that opens the Streamlit URL in a WebView.
+
+How it works:
+- On first run, the app asks for the Streamlit URL and stores it locally.
+- You can change the URL later via the menu.
+
+Build (via GitHub Actions):
+- Push any change in `android-app/` to trigger the workflow.
+- Download the artifact `PryPalScanner-debug-apk` from the Actions run.

@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">PryPalScanner</string>
+    <string name="menu_settings">Set URL</string>
+    <string name="dialog_title">Streamlit URL</string>
+    <string name="dialog_hint">https://your-streamlit-app</string>
+    <string name="dialog_save">Save</string>
+    <string name="dialog_cancel">Cancel</string>
+</resources>
