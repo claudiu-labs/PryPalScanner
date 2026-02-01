@@ -20,9 +20,10 @@ Set one of these:
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (JSON string)
 - `GOOGLE_SERVICE_ACCOUNT_FILE` (path to json file)
 
-Also set:
+Also set (one of the two):
 
 - `GOOGLE_SHEET_ID`
+- `GOOGLE_SHEET_TITLE` (optional, used to create sheet if ID missing)
 - `ADMIN_PASSWORD`
 
 Example (Linux/macOS):

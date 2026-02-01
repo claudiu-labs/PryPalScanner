@@ -9,9 +9,11 @@ import streamlit as st
 try:
     import gspread
     from google.oauth2.service_account import Credentials
+    from gspread.exceptions import SpreadsheetNotFound
 except Exception as exc:  # pragma: no cover - runtime dependency
     gspread = None
     Credentials = None
+    SpreadsheetNotFound = Exception
 
 # Optional OCR (works only if tesseract is installed on the host)
 try:
@@ -140,6 +142,21 @@ def get_gs_client():
     ]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
+
+def get_or_create_spreadsheet(client, sheet_id: str | None, title: str | None):
+    if sheet_id:
+        try:
+            return client.open_by_key(sheet_id), False
+        except SpreadsheetNotFound:
+            pass
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot access sheet id {sheet_id}. Check permissions or ID."
+            ) from exc
+
+    title = title or "PryPalScanner_Data"
+    spreadsheet = client.create(title)
+    return spreadsheet, True
 
 
 def ensure_worksheet(spreadsheet, name: str, headers: list[str]):
@@ -645,14 +662,21 @@ def main():
 
     client = get_gs_client()
     sheet_id = get_secret("GOOGLE_SHEET_ID")
+    sheet_title = get_secret("GOOGLE_SHEET_TITLE", "PryPalScanner_Data")
 
-    if client is None or not sheet_id:
+    if client is None:
         st.error(
-            "Google Sheets nu este configurat. Seteaza GOOGLE_SHEET_ID si GOOGLE_SERVICE_ACCOUNT_JSON / FILE."
+            "Google Sheets nu este configurat. Seteaza GOOGLE_SHEET_ID "
+            "sau GOOGLE_SHEET_TITLE si GOOGLE_SERVICE_ACCOUNT_JSON / FILE."
         )
         st.stop()
 
-    spreadsheet = client.open_by_key(sheet_id)
+    spreadsheet, created = get_or_create_spreadsheet(client, sheet_id, sheet_title)
+    if created:
+        st.warning(
+            f"Am creat un nou Google Sheet: {spreadsheet.title}. "
+            f"ID: {spreadsheet.id}. Actualizeaza GOOGLE_SHEET_ID cu acest ID."
+        )
 
     if "admin_mode" not in st.session_state:
         st.session_state.admin_mode = False
