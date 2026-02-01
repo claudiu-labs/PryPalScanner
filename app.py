@@ -950,18 +950,17 @@ def main():
 
     if not st.session_state.auth_role:
         st.markdown("## Conectare")
-        username = st.text_input("User")
         password = st.text_input("Parola", type="password")
         if st.button("Login"):
             operator_pw = get_secret("OPERATOR_PASSWORD", "PryPass2026")
             admin_pw = get_secret("ADMIN_PASSWORD", "PryAdmin2026")
             if password == admin_pw:
                 st.session_state.auth_role = "admin"
-                st.session_state.username = username.strip() or "admin"
+                st.session_state.username = "admin"
                 st.rerun()
             elif password == operator_pw:
                 st.session_state.auth_role = "operator"
-                st.session_state.username = username.strip() or "operator"
+                st.session_state.username = "operator"
                 st.rerun()
             else:
                 st.error("Parola gresita.")
