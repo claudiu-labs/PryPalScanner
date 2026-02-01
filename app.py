@@ -584,6 +584,30 @@ def get_active_drums(ws_drums, material_code: str) -> pd.DataFrame:
     ]
 
 
+@st.cache_data(ttl=5, show_spinner=False, hash_funcs={FirestoreCollection: lambda _: "firestore"})
+def _get_active_drum_counts_cached(ws_drums) -> dict:
+    docs = ws_drums.query([("status", "==", "ACTIVE")])
+    counts: dict[str, int] = {}
+    for doc in docs:
+        data = doc.to_dict() or {}
+        code = data.get("material_code")
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    return counts
+
+
+def get_active_drum_counts(ws_drums) -> dict:
+    if isinstance(ws_drums, FirestoreCollection):
+        return _get_active_drum_counts_cached(ws_drums)
+    df = load_sheet(ws_drums)
+    if df.empty:
+        return {}
+    active = df[df["status"] == "ACTIVE"]
+    if active.empty or "material_code" not in active.columns:
+        return {}
+    return active.groupby("material_code").size().to_dict()
+
+
 def find_drum(ws_drums, drum_number: str) -> pd.DataFrame:
     if isinstance(ws_drums, FirestoreCollection):
         doc = ws_drums.get_doc(drum_number)
@@ -621,9 +645,11 @@ def add_drum(ws_drums, row: dict):
         if not doc_id:
             raise RuntimeError("Missing drum_number for Firestore document id.")
         ws_drums.set_doc(doc_id, row)
+        clear_cached_data()
         return
     headers = ws_drums.row_values(1)
     ws_drums.append_row([row.get(h, "") for h in headers])
+    clear_cached_data()
 
 def add_pallet(ws_pallets, pallet_id: str, row: dict):
     if isinstance(ws_pallets, FirestoreCollection):
@@ -639,8 +665,17 @@ def get_operator_name() -> str:
 def delete_row(ws, row_idx: int):
     if isinstance(ws, FirestoreCollection):
         ws.delete_doc(str(row_idx))
+        clear_cached_data()
         return
     ws.delete_rows(row_idx)
+    clear_cached_data()
+
+
+def clear_cached_data():
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
 
 
 # -------------------- UI Helpers --------------------
@@ -745,6 +780,7 @@ def operator_screen(spreadsheet):
             return
 
         cols = st.columns(2)
+        counts_map = get_active_drum_counts(ws_drums)
         for idx, (_, row) in enumerate(active_materials.iterrows()):
             code = row["material_code"]
             description = row.get("description", "")
@@ -752,8 +788,7 @@ def operator_screen(spreadsheet):
                 max_qty = int(row.get("max_qty") or 0)
             except Exception:
                 max_qty = 0
-            active_drums = get_active_drums(ws_drums, code)
-            count = len(active_drums)
+            count = int(counts_map.get(code, 0))
 
             if count == 0:
                 status = "GREEN"
@@ -1018,6 +1053,7 @@ def operator_screen(spreadsheet):
             )
 
             set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+            clear_cached_data()
             st.session_state.confirm_generate = False
             st.success(t("pallet_generated"))
             st.session_state.selected_material = None
@@ -1063,6 +1099,7 @@ def operator_screen(spreadsheet):
                 )
 
                 set_setting(ws_settings, "global_pallet_counter", str(counter + 1))
+                clear_cached_data()
                 st.session_state.confirm_incomplete = False
                 st.success(t("pallet_incomplete_generated"))
                 st.session_state.selected_material = None
